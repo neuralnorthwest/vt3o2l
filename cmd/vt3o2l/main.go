@@ -262,6 +262,98 @@ func (s *TranscriptService) Convert(inputPath, outputPath string) error {
 	return nil
 }
 
+func (s *TranscriptService) ConvertWithSplit(inputPath, outputBasePath string, maxUtterances int) error {
+	// Read input file
+	content, err := os.ReadFile(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to read input file: %w", err)
+	}
+
+	// Determine input format
+	inputExt := strings.ToLower(filepath.Ext(inputPath))
+	parser, exists := s.parsers[inputExt]
+	if !exists {
+		return fmt.Errorf("unsupported input format: %s", inputExt)
+	}
+
+	// Parse input
+	data, err := parser.Parse(content)
+	if err != nil {
+		return fmt.Errorf("failed to parse input: %w", err)
+	}
+
+	// Determine output format
+	outputExt := strings.ToLower(filepath.Ext(outputBasePath))
+	writer, exists := s.writers[outputExt]
+	if !exists {
+		return fmt.Errorf("unsupported output format: %s", outputExt)
+	}
+
+	// Split data into chunks with max utterances
+	splitChunks := s.splitDataIntoFiles(data, maxUtterances)
+
+	// Generate output file paths and write each split
+	outputFileBase := strings.TrimSuffix(outputBasePath, outputExt)
+	var totalChunks, totalUtterances int
+
+	for i, splitData := range splitChunks {
+		outputFilePath := fmt.Sprintf("%s_part%d%s", outputFileBase, i+1, outputExt)
+
+		output, err := writer.Write(splitData)
+		if err != nil {
+			return fmt.Errorf("failed to generate output for part %d: %w", i+1, err)
+		}
+
+		if err := os.WriteFile(outputFilePath, output, 0644); err != nil {
+			return fmt.Errorf("failed to write output file %s: %w", outputFilePath, err)
+		}
+
+		partChunks := len(splitData.Chunks)
+		partUtterances := 0
+		for _, chunk := range splitData.Chunks {
+			partUtterances += len(chunk.Utterances)
+		}
+
+		totalChunks += partChunks
+		totalUtterances += partUtterances
+
+		fmt.Printf("✓ Created %s (%d chunks, %d utterances)\n", outputFilePath, partChunks, partUtterances)
+	}
+
+	fmt.Printf("✓ Converted %s into %d files\n", inputPath, len(splitChunks))
+	fmt.Printf("  Total: %d chunks, %d utterances (max %d utterances per file)\n", totalChunks, totalUtterances, maxUtterances)
+
+	return nil
+}
+
+func (s *TranscriptService) splitDataIntoFiles(data *TranscriptData, maxUtterances int) []*TranscriptData {
+	var result []*TranscriptData
+	var currentChunks []Chunk
+	var currentUtteranceCount int
+
+	for _, chunk := range data.Chunks {
+		chunkUtterances := len(chunk.Utterances)
+
+		// If adding this chunk would exceed the limit, finalize current split
+		if currentUtteranceCount > 0 && currentUtteranceCount+chunkUtterances > maxUtterances {
+			result = append(result, &TranscriptData{Chunks: currentChunks})
+			currentChunks = []Chunk{}
+			currentUtteranceCount = 0
+		}
+
+		// Add chunk to current split
+		currentChunks = append(currentChunks, chunk)
+		currentUtteranceCount += chunkUtterances
+	}
+
+	// Add the final split if it has any chunks
+	if len(currentChunks) > 0 {
+		result = append(result, &TranscriptData{Chunks: currentChunks})
+	}
+
+	return result
+}
+
 func (s *TranscriptService) Validate(vttPath, jsonPath string) error {
 	// Read and parse VTT
 	vttContent, err := os.ReadFile(vttPath)
@@ -476,13 +568,15 @@ func newRootCmd() *cobra.Command {
 
 func newConvertCmd() *cobra.Command {
 	var outputPath string
+	var maxUtterances int
 
 	cmd := &cobra.Command{
 		Use:   "convert <input_file>",
 		Short: "Convert between VTT and JSON formats",
 		Long: `Convert transcript files between WebVTT (.vtt) and JSON (.json) formats.
 The output format is automatically determined from the output file extension.
-If no output file is specified, the input filename with swapped extension is used.`,
+If no output file is specified, the input filename with swapped extension is used.
+Use --max-utterances to split output into multiple files with limited utterances per file.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inputPath := args[0]
@@ -492,6 +586,13 @@ If no output file is specified, the input filename with swapped extension is use
 			}
 
 			service := NewTranscriptService()
+
+			// If max-utterances is specified, use split conversion
+			if maxUtterances > 0 {
+				return service.ConvertWithSplit(inputPath, outputPath, maxUtterances)
+			}
+
+			// Regular conversion
 			if err := service.Convert(inputPath, outputPath); err != nil {
 				return err
 			}
@@ -505,6 +606,7 @@ If no output file is specified, the input filename with swapped extension is use
 	}
 
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output file path (auto-generated if not specified)")
+	cmd.Flags().IntVar(&maxUtterances, "max-utterances", 0, "Split output into multiple files with max utterances per file (0 = no splitting)")
 
 	return cmd
 }
