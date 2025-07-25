@@ -1,4 +1,4 @@
-module vt3o2l
+module github.com/neuralnorthwest/vt3o2l
 
 go 1.24.0
 
